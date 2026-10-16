@@ -37,6 +37,8 @@ export function systemFor(key) {
 // ---------- quote verification against the brain ----------
 const norm = (s) =>
   s.toLowerCase().replace(/[‘’]/g, "'").replace(/'\s+(t|s|re|ll|ve|d|m)\b/g, "'$1")
+    // a single quote used as a quotation mark (not inside a word, like don't) is punctuation
+    .replace(/(?<![a-z0-9])'|'(?![a-z0-9])/g, " ")
     .replace(/[^a-z0-9' ]+/g, " ").replace(/\s+/g, " ").trim();
 const brainText = new Map();
 function brainNorm(key) {
@@ -47,16 +49,43 @@ function brainNorm(key) {
   }
   return brainText.get(key);
 }
+// a closing quote, then a source id within 40 characters: "..." (S095), "..." [S048, 2026],
+// or "..." (Lead magnets, S112). Same rules as scripts/check_quotes.py.
+const CLOSE_THEN_ID = /["”](?=[^\n"“”]{0,40}?[(\[](?:[^()\[\]\n"“”]{0,30}?,\s*)?(S\d{3}))/g;
+// whether the quote mark at line[i] opens a quote (curly marks say so; straight ones by context)
+function isOpen(line, i) {
+  const ch = line[i];
+  if (ch === "“" || ch === "”") return ch === "“";
+  const next = line[i + 1] ?? " ", prev = line[i - 1] ?? " ";
+  // a mark right before "(" or "[" closes a quote, as in get,"(S011)
+  return !/\s/.test(next) && !"([".includes(next) && !(/[A-Za-z0-9]/.test(prev) || ".!?".includes(prev));
+}
+// The quote whose closing mark is line[end]: scan back, so a nested quote stays inside it, an
+// earlier separate quote stays out, and an opening mark that never closes widens it.
+function quoteEndingAt(line, end) {
+  let depth = 1, start = null;
+  for (let i = end - 1; i >= 0; i--) {
+    if (!'"“”'.includes(line[i])) continue;
+    if (!isOpen(line, i)) { depth++; continue; }
+    depth--;
+    if (start === null && depth === 0) start = i + 1;
+    else if (depth < 0) { start = i + 1; depth = 0; }
+  }
+  return start === null ? null : line.slice(start, end);
+}
 /** Quotes the seat attributed to a source id, each marked verified or not. */
 export function checkQuotes(key, text) {
   const out = [];
-  const re = /["“]([^"“”\n]{20,400})["”][^\n"]{0,40}?[(\[](S\d{3})/g;
-  let m;
   const hay = brainNorm(key);
-  while ((m = re.exec(text))) {
-    const q = norm(m[1]);
-    if (q.split(" ").length < 5) continue;
-    out.push({ quote: m[1], source: m[2], verified: hay.includes(q) || hay.replace(/ /g, "").includes(q.replace(/ /g, "")) });
+  for (const line of text.split("\n")) {
+    for (const m of line.matchAll(CLOSE_THEN_ID)) {
+      if (isOpen(line, m.index)) continue;
+      const quote = quoteEndingAt(line, m.index);
+      if (quote === null || quote.length < 20 || quote.length > 400) continue;
+      const q = norm(quote);
+      if (q.split(" ").length < 5) continue;
+      out.push({ quote, source: m[1], verified: hay.includes(q) || hay.replace(/ /g, "").includes(q.replace(/ /g, "")) });
+    }
   }
   return out;
 }
